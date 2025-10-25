@@ -709,113 +709,135 @@ app.delete("/api/users/me/addresses/:id", authRequired, async (req, res) => {
 
 /////////////////////////ส่งพัสดุ
 ////เพิ่ม
-app.post("/api/parcels", upload.array("images"), async (req, res) => {
-  try {
-    let { senderId, receiverId, receiverAddress, items } = req.body;
-    console.log("📦 รับพัสดุใหม่จาก senderId:", senderId, "ให้ receiverId:", receiverId);
+app.post(
+  "/api/parcels",
+  upload.fields([
+    { name: "images", maxCount: 10 },
+    { name: "proofImage", maxCount: 1 },
+  ]),
+  async (req, res) => {
+    try {
+      let { senderId, receiverId, receiverAddress, items } = req.body;
+      console.log("📦 รับพัสดุใหม่จาก senderId:", senderId, "ให้ receiverId:", receiverId);
 
-    // ✅ ตรวจสอบค่าที่จำเป็น
-    if (!senderId || !receiverId || !items) {
-      return res.status(400).json({
-        success: false,
-        message: "กรุณากรอก senderId, receiverId และ items ให้ครบ",
-      });
-    }
-
-    // ✅ แปลง items เป็น array ถ้ายังเป็น string
-    if (typeof items === "string") {
-      try {
-        items = JSON.parse(items);
-      } catch (e) {
-        console.warn("⚠️ items parse failed:", e);
+      // ✅ ตรวจสอบค่าที่จำเป็น
+      if (!senderId || !receiverId || !items) {
         return res.status(400).json({
           success: false,
-          message: "รูปแบบ items ไม่ถูกต้อง (ต้องเป็น JSON array)",
+          message: "กรุณากรอก senderId, receiverId และ items ให้ครบ",
         });
       }
-    }
 
-    // ✅ แปลง receiverAddress เป็น object ถ้าเป็น string
-    if (typeof receiverAddress === "string") {
-      try {
-        receiverAddress = JSON.parse(receiverAddress);
-      } catch (e) {
-        console.warn("⚠️ receiverAddress parse failed:", e);
-        receiverAddress = {};
+      // ✅ แปลง items เป็น array ถ้ายังเป็น string
+      if (typeof items === "string") {
+        try {
+          items = JSON.parse(items);
+        } catch (e) {
+          console.warn("⚠️ items parse failed:", e);
+          return res.status(400).json({
+            success: false,
+            message: "รูปแบบ items ไม่ถูกต้อง (ต้องเป็น JSON array)",
+          });
+        }
       }
-    }
 
-    // ✅ ปรับโครงสร้าง address ให้รองรับได้ทั้ง Dropdown / Map
-    const normalizedAddress = {
-      label:
-        receiverAddress.label ||
-        receiverAddress.address_label ||
-        "ที่อยู่จากระบบหรือพิกัดแผนที่",
-      address:
-        receiverAddress.address_detail ||
-        receiverAddress.address ||
-        "เลือกจากแผนที่",
-      lat:
-        Number(receiverAddress.gps_latitude) ||
-        Number(receiverAddress.lat) ||
-        0,
-      lng:
-        Number(receiverAddress.gps_longitude) ||
-        Number(receiverAddress.lng) ||
-        0,
-    };
-
-    if (!normalizedAddress.lat || !normalizedAddress.lng) {
-      console.warn("⚠️ Missing lat/lng in receiverAddress");
-    }
-
-    // ✅ อัปโหลดรูปทั้งหมดก่อน แล้ว map กลับไปยัง items
-    const imageUrls = [];
-    if (req.files && req.files.length > 0) {
-      for (let i = 0; i < req.files.length; i++) {
-        const up = await uploadBufferToCloudinary(req.files[i].buffer, "delivery/parcels");
-        imageUrls.push(up.secure_url);
+      // ✅ แปลง receiverAddress เป็น object ถ้าเป็น string
+      if (typeof receiverAddress === "string") {
+        try {
+          receiverAddress = JSON.parse(receiverAddress);
+        } catch (e) {
+          console.warn("⚠️ receiverAddress parse failed:", e);
+          receiverAddress = {};
+        }
       }
+
+      // ✅ Normalize address
+      const normalizedAddress = {
+        label:
+          receiverAddress.label ||
+          receiverAddress.address_label ||
+          "ที่อยู่จากระบบหรือพิกัดแผนที่",
+        address:
+          receiverAddress.address_detail ||
+          receiverAddress.address ||
+          "เลือกจากแผนที่",
+        lat:
+          Number(receiverAddress.gps_latitude) ||
+          Number(receiverAddress.lat) ||
+          0,
+        lng:
+          Number(receiverAddress.gps_longitude) ||
+          Number(receiverAddress.lng) ||
+          0,
+      };
+
+      if (!normalizedAddress.lat || !normalizedAddress.lng) {
+        console.warn("⚠️ Missing lat/lng in receiverAddress");
+      }
+
+      // ✅ อัปโหลดรูปสินค้า
+      const imageUrls = [];
+      if (req.files && req.files["images"] && req.files["images"].length > 0) {
+        console.log(`🖼️ อัปโหลดรูปสินค้า ${req.files["images"].length} ไฟล์`);
+        for (const file of req.files["images"]) {
+          const up = await uploadBufferToCloudinary(file.buffer, "delivery/parcels");
+          imageUrls.push(up.secure_url);
+        }
+      }
+
+      // ✅ อัปโหลดรูปหลักฐาน (proofImage)
+      let proofImageUrl = "";
+      if (req.files && req.files["proofImage"] && req.files["proofImage"].length > 0) {
+        const proof = req.files["proofImage"][0];
+        const upProof = await uploadBufferToCloudinary(proof.buffer, "delivery/proof");
+        proofImageUrl = upProof.secure_url;
+        console.log("📸 อัปโหลดรูปหลักฐานสำเร็จ:", proofImageUrl);
+      } else {
+        console.warn("⚠️ ไม่มีรูปหลักฐานแนบมาจาก Flutter");
+      }
+
+      // ✅ รวม items กับรูปภาพ
+      const enrichedItems = items.map((item, i) => ({
+        ...item,
+        productName: item.productName || "ไม่ระบุชื่อสินค้า",
+        imageUrl: imageUrls[i] || null,
+      }));
+
+      // ✅ เตรียมข้อมูล order
+      const newDoc = db.collection("orders").doc();
+      const orderData = {
+        orderId: newDoc.id,
+        senderId,
+        receiverId,
+        address: normalizedAddress,
+        items: enrichedItems,
+        itemsCount: enrichedItems.length,
+        proofImage: proofImageUrl || null,
+        status: 1, // 1 = รอไรเดอร์รับสินค้า
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
+
+      // ✅ บันทึกลง Firestore
+      await newDoc.set(orderData);
+      console.log(`✅ สร้างออเดอร์สำเร็จ senderId=${senderId}, items=${enrichedItems.length}`);
+
+      // ✅ ส่งกลับ Flutter
+      res.json({
+        success: true,
+        message: "✅ เพิ่มพัสดุสำเร็จ!",
+        data: {
+          orderId: newDoc.id,
+          itemsCount: enrichedItems.length,
+          proofImageUrl,
+        },
+      });
+    } catch (err) {
+      console.error("🔥 Error /api/parcels:", err);
+      res.status(500).json({ success: false, message: err.message });
     }
-
-    // ✅ รวม items กับรูปภาพ (ถ้ามี)
-    const enrichedItems = items.map((item, i) => ({
-      ...item,
-      productName: item.productName || "ไม่ระบุชื่อสินค้า",
-      imageUrl: imageUrls[i] || null,
-    }));
-
-    // ✅ เตรียมข้อมูล order เดียว
-    const newDoc = db.collection("orders").doc();
-    const orderData = {
-      orderId: newDoc.id,
-      senderId,
-      receiverId,
-      address: normalizedAddress,
-      items: enrichedItems,
-      itemsCount: enrichedItems.length,
-      status: 1, // 1 = รอไรเดอร์รับสินค้า
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    };
-
-    // ✅ บันทึกลง Firestore
-    await newDoc.set(orderData);
-
-    console.log(`✅ สร้างออเดอร์สำเร็จ senderId=${senderId}, items=${enrichedItems.length}`);
-    
-    // ✅ ส่งกลับ
-    res.json({
-      success: true,
-      message: "✅ เพิ่มพัสดุสำเร็จ!",
-      data: { orderId: newDoc.id, itemsCount: enrichedItems.length },
-    
-    });
-  } catch (err) {
-    console.error("🔥 Error /api/parcels:", err);
-    res.status(500).json({ success: false, message: err.message });
   }
-});
+);
 
 
 
