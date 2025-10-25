@@ -926,37 +926,52 @@ app.get("/api/users/search", async (req, res) => {
 app.post("/api/orders/:id/proof", upload.single("image"), async (req, res) => {
   try {
     const { id } = req.params;
+
     if (!req.file?.buffer) {
-      return res
-        .status(400)
-        .json({ success: false, message: "กรุณาแนบรูปภาพ" });
+      return res.status(400).json({
+        success: false,
+        message: "กรุณาแนบรูปภาพหลักฐาน (image)",
+      });
     }
 
-    // 📸 อัปโหลดรูปไป Cloudinary
-    const up = await uploadBufferToCloudinary(
-      req.file.buffer,
-      "delivery/proof"
-    );
+    console.log(`📤 [UPLOAD PROOF] Order ID = ${id}`);
+    console.log(`📸 ไฟล์ที่ได้รับ: ${req.file.originalname} (${req.file.mimetype})`);
+
+    // 📸 อัปโหลดรูปไปยัง Cloudinary
+    const up = await uploadBufferToCloudinary(req.file.buffer, "delivery/proof");
+
+    console.log(`✅ อัปโหลดสำเร็จ → ${up.secure_url}`);
+
+    // ✅ เตรียมข้อมูลที่จะอัปเดต Firestore
+    const ref = db.collection("orders").doc(id);
+    const updateData = {
+      proofImageUrl: up.secure_url,   // ✅ ใช้ชื่อมาตรฐานใหม่
+      proofImage: up.secure_url,      // ✅ เผื่อให้โค้ดเก่าที่ยังใช้ key นี้ดึงได้
+      updatedAt: new Date(),
+    };
 
     // ✅ อัปเดต Firestore
-    const ref = db.collection("orders").doc(id);
-    await ref.update({
-      proofImageUrl: up.secure_url,
-      updatedAt: new Date(),
-    });
+    await ref.set(updateData, { merge: true });
 
+    console.log("🔥 Firestore updated successfully with new proof image.");
+
+    // ✅ ตอบกลับ Flutter
     res.json({
       success: true,
       message: "อัปโหลดรูปหลักฐานสำเร็จ",
       proofImageUrl: up.secure_url,
+      imageUrl: up.secure_url,  // ✅ เพิ่ม key เสริมให้ Flutter รุ่นเก่าดึงได้
     });
+
   } catch (err) {
     console.error("🔥 Error /api/orders/:id/proof:", err);
-    res
-      .status(500)
-      .json({ success: false, message: err.message || "Server error" });
+    res.status(500).json({
+      success: false,
+      message: err.message || "Server error",
+    });
   }
 });
+
 
 //////////////////////////////////////////////////////////
 // 📦 ดึงพัสดุของผู้ส่ง (Sender)
@@ -1132,6 +1147,10 @@ app.get("/api/parcels/:orderId", async (req, res) => {
     const receiver = receiverDoc?.exists ? receiverDoc.data() : null;
     const rider = riderDoc?.exists ? riderDoc.data() : null;
 
+    // ✅ ปรับปรุงการดึง proof image
+    const proofImageUrl =
+      d.proofImageUrl || d.proofImage || d.image || "";
+
     // ✅ สร้างโครงสร้างข้อมูลแบบสมบูรณ์
     const data = {
       orderId: doc.id,
@@ -1143,7 +1162,7 @@ app.get("/api/parcels/:orderId", async (req, res) => {
       items: Array.isArray(d.items) ? d.items : [],
       itemsCount: Array.isArray(d.items) ? d.items.length : 0,
 
-      proofImageUrl: d.proofImageUrl || "",
+      proofImageUrl, // ✅ ฟิลด์นี้ตรงกับ Flutter แน่นอน
       status: d.status || 0,
       createdAt: d.createdAt || null,
       updatedAt: d.updatedAt || null,
@@ -1189,6 +1208,7 @@ app.get("/api/parcels/:orderId", async (req, res) => {
     });
   }
 });
+
 
 
 
