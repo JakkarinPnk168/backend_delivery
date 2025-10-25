@@ -1209,6 +1209,211 @@ app.get("/api/parcels/:orderId", async (req, res) => {
   }
 });
 
+///////////////////////////Tee
 
+// =============================================================================== Tee =====
+// ✅ ดึงงานของ Rider (ทั้งรอรับ และที่ตัวเองรับไปแล้ว)
+app.get("/api/orders/rider", authRequired, async (req, res) => {
+  try {
+    if (req.user.role !== "rider") {
+      return res.status(403).json({
+        success: false,
+        message: "ไม่ใช่ Rider",
+      });
+    }
+
+    const { mode } = req.query; // mode = "available" หรือ "mine"
+
+    let query = db.collection("orders");
+
+    if (mode === "mine") {
+      // ✅ งานที่ตัวเองรับไปแล้ว
+      query = query.where("riderId", "==", req.user.userId);
+    } else {
+      // ✅ งานที่รอรับ
+      query = query.where("status", "==", 1);
+    }
+
+    const snapshot = await query.orderBy("createdAt", "desc").get();
+
+    if (snapshot.empty) {
+      return res.json({ success: true, count: 0, data: [] });
+    }
+
+    const orders = snapshot.docs.map((doc) => {
+      const d = doc.data();
+      return {
+        orderId: doc.id,
+        senderId: d.senderId,
+        receiverId: d.receiverId,
+        riderId: d.riderId || null,
+        status: d.status || 0,
+        items: d.items || [],
+        address: d.address || {},
+        createdAt:
+          d.createdAt?.toDate?.().toISOString() || d.createdAt || null,
+        updatedAt:
+          d.updatedAt?.toDate?.().toISOString() || d.updatedAt || null,
+      };
+    });
+
+    console.log(
+      `📦 Rider ${req.user.userId} loaded ${orders.length} orders (mode=${mode || "available"})`
+    );
+
+    return res.json({
+      success: true,
+      count: orders.length,
+      data: orders,
+    });
+  } catch (err) {
+    console.error("🔥 Error /api/orders/rider:", err);
+    return res.status(500).json({
+      success: false,
+      message: err.message || "Server error",
+    });
+  }
+});
+
+
+// ✅ Rider กด "รับงาน"
+app.post("/api/orders/:orderId/accept", authRequired, async (req, res) => {
+  try {
+    if (req.user.role !== "rider") {
+      return res
+        .status(403)
+        .json({ success: false, message: "ไม่ใช่ Rider" });
+    }
+
+    const { orderId } = req.params;
+    const orderRef = db.collection("orders").doc(orderId);
+
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(orderRef);
+      if (!snap.exists) throw new Error("ไม่พบออเดอร์นี้");
+
+      const data = snap.data();
+      if (data.status !== 1 || data.riderId)
+        throw new Error("ออเดอร์นี้ถูกรับไปแล้ว");
+
+      tx.update(orderRef, {
+        status: 2, // กำลังไปรับสินค้า
+        riderId: req.user.userId,
+        updatedAt: new Date(),
+      });
+    });
+
+    console.log(`🚴 Rider ${req.user.userId} accepted order ${orderId}`);
+    res.json({ success: true, message: "รับงานสำเร็จ" });
+  } catch (err) {
+    console.error("❌ Accept order failed:", err);
+    res.status(400).json({ success: false, message: err.message });
+  }
+});
+
+
+// ✅ Rider อัปเดตสถานะ + รูปหลักฐาน
+app.post(
+  "/api/orders/:orderId/status",
+  authRequired,
+  upload.single("image"),
+  async (req, res) => {
+    try {
+      if (req.user.role !== "rider") {
+        return res
+          .status(403)
+          .json({ success: false, message: "ไม่ใช่ Rider" });
+      }
+
+      const { orderId } = req.params;
+      let statusNum = Number(req.body.status);
+
+      if (![3, 4].includes(statusNum)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid status" });
+      }
+
+      const orderRef = db.collection("orders").doc(orderId);
+      const updateData = {
+        status: statusNum,
+        updatedAt: new Date(),
+      };
+
+      // ✅ ถ้ามีรูปภาพแนบมา
+      if (req.file?.buffer) {
+        const up = await uploadBufferToCloudinary(
+          req.file.buffer,
+          "delivery/orders"
+        );
+        updateData[`proofImageUrl`] = up.secure_url;
+        updateData[`proofImagePublicId`] = up.public_id;
+      }
+
+      await orderRef.update(updateData);
+
+      console.log(
+        `✅ Rider ${req.user.userId} updated order ${orderId} → status=${statusNum}`
+      );
+
+      res.json({
+        success: true,
+        message: "อัปเดตสถานะสำเร็จ",
+        data: { orderId, status: statusNum },
+      });
+    } catch (err) {
+      console.error("❌ Error updating order:", err);
+      res.status(500).json({ success: false, message: err.message });
+    }
+  }
+);
+
+
+// ✅ User ดึงออเดอร์ที่ตัวเองส่ง
+app.get("/api/orders/user", authRequired, async (req, res) => {
+  try {
+    const snap = await db
+      .collection("orders")
+      .where("senderId", "==", req.user.userId)
+      .orderBy("createdAt", "desc")
+      .get();
+
+    const orders = snap.docs.map((d) => ({
+      orderId: d.id,
+      ...d.data(),
+    }));
+
+    res.json({ success: true, count: orders.length, data: orders });
+  } catch (err) {
+    console.error("🔥 Error /api/orders/user:", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+
+// ✅ Upload รูปทั่วไป (เช่น profile, proof)
+app.post("/api/upload/image", upload.single("image"), async (req, res) => {
+  try {
+    if (!req.file?.buffer) {
+      return res
+        .status(400)
+        .json({ success: false, message: "No file uploaded" });
+    }
+
+    const up = await uploadBufferToCloudinary(
+      req.file.buffer,
+      "delivery/uploads"
+    );
+
+    res.json({
+      success: true,
+      imageUrl: up.secure_url,
+      publicId: up.public_id,
+    });
+  } catch (err) {
+    console.error("🔥 Error upload:", err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
 
 
